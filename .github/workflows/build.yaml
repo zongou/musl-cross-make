@@ -1,0 +1,144 @@
+name: Build
+run-name: Build (${{ github.event.head_commit.message }})
+
+on:
+  push:
+    branches: ["master"]
+    paths:
+      - .github/workflows/*
+  workflow_dispatch:
+#   pull_request:
+#     branches: ["master"]
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - aarch64-linux-musl
+          - x86_64-linux-musl
+    env:
+      GCC_VER: 13.2.0
+      BINUTILS_VER: 2.41
+      MUSL_VER: 1.2.4
+      GMP_VER: 6.3.0
+      MPC_VER: 1.3.1
+      MPFR_VER: 4.2.1
+      ISL_VER: 0.26
+      LINUX_VER: 6.6.8
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Patch tar command without verbose
+        run: |
+          cat Makefile | sed 's/tar zxvf/tar zxf/' | sed 's/tar jxvf/tar jxf/' | sed 's/tar Jxvf/tar Jxf/' > Makefile_tmp
+          mv Makefile_tmp Makefile
+
+      - name: Configurate config.mak
+        run: |
+          cat <<-EOF >config.mak
+          GCC_VER = ${{env.GCC_VER}}
+          BINUTILS_VER = ${{env.BINUTILS_VER}}
+          MUSL_VER = ${{env.MUSL_VER}}
+          GMP_VER = ${{env.GMP_VER}}
+          MPC_VER = ${{env.MPC_VER}}
+          MPFR_VER = ${{env.MPFR_VER}}
+          ISL_VER = ${{env.ISL_VER}}
+          LINUX_VER = ${{env.LINUX_VER}}
+
+          DL_CMD = curl -C - -L -o
+          STAT = -static --static
+          FLAG = -g0 -O2 -fno-align-functions -fno-align-jumps -fno-align-loops -fno-align-labels -Wno-error
+
+          COMMON_CONFIG += CFLAGS="\${FLAG} \${STAT}" CXXFLAGS="\${FLAG} \${STAT}" FFLAGS="\${FLAG} \${STAT}" LDFLAGS="-s \${STAT} \${STAT}"
+
+          BINUTILS_CONFIG += --enable-gold=yes
+          BINUTILS_CONFIG += --disable-gprofng
+          GCC_CONFIG += --enable-default-pie --enable-static-pie --disable-cet
+          EOF
+
+      - name: Restore cached sources
+        id: cache-restore
+        uses: actions/cache/restore@v3
+        with:
+          path: |
+            sources
+          key: sources-${{hashFiles('config.mak')}}
+
+      - name: Build ${{matrix.target}}-cross
+        run: |
+          ".github/scripts/build-toolchain.sh" --target=${{matrix.target}} --cross
+
+      - name: Cache sources if needed
+        if: steps.cache-restore.outputs.cache-hit != 'true'
+        id: cache-save
+        uses: actions/cache/save@v3
+        with:
+          path: |
+            sources
+          key: sources-${{hashFiles('config.mak')}}
+
+      - name: Checkout ${{matrix.target}}-cross
+        run: |
+          tree -aL 2 ${{matrix.target}}-cross
+          file ${{matrix.target}}-cross/bin/*
+
+      - name: Build ${{matrix.target}}-native
+        run: |
+          ".github/scripts/build-toolchain.sh" --target=${{matrix.target}} --native
+
+      - name: Checkout ${{matrix.target}}-native
+        run: |
+          tree -aL 2 ${{matrix.target}}-native
+          file ${{matrix.target}}-native/bin/*
+
+      - name: Package output
+        run: |
+          tar -c ${{matrix.target}}-cross | xz -T0 > ${{matrix.target}}-cross.tar.xz
+          tar -c ${{matrix.target}}-native | xz -T0 > ${{matrix.target}}-native.tar.xz
+
+      - name: Upload ${{matrix.target}}-cross
+        uses: actions/upload-artifact@main
+        with:
+          name: ${{matrix.target}}-cross.tar.xz
+          path: ${{matrix.target}}-cross.tar.xz
+
+      - name: Upload ${{matrix.target}}-native
+        uses: actions/upload-artifact@main
+        with:
+          name: ${{matrix.target}}-native.tar.xz
+          path: ${{matrix.target}}-native.tar.xz
+
+      - name: Upload release
+        uses: ncipollo/release-action@v1.13.0
+        with:
+          tag: "v${{env.GCC_VER}}"
+          artifacts: |
+            ${{matrix.target}}-cross.tar.xz
+            ${{matrix.target}}-native.tar.xz
+          allowUpdates: true
+          replacesArtifacts: true
+          body: |
+            [action](${{github.server_url}}/${{github.repository}}/actions/runs/${{github.run_id}})
+            * [gcc](https://ftp.gnu.org/gnu/gcc/): **${{env.GCC_VER}}**
+            * [binutils](https://ftp.gnu.org/gnu/binutils/): **${{env.BINUTILS_VER}}**
+            * [musl](https://git.musl-libc.org/cgit/musl/log/): **${{env.MUSL_VER}}**
+            * [gmp](https://ftp.gnu.org/gnu/gmp/): **${{env.GMP_VER}}**
+            * [mpc](https://ftp.gnu.org/gnu/mpc/): **${{env.MPC_VER}}**
+            * [mpfr](https://ftp.gnu.org/gnu/mpfr/): **${{env.MPFR_VER}}**
+            * [isl](https://sourceforge.net/projects/libisl/): **${{env.ISL_VER}}**
+            * [Linux](https://www.kernel.org/): **${{env.LINUX_VER}}**
+
+      - name: Delete workflow runs
+        uses: Mattraks/delete-workflow-runs@v2.0.6
+        with:
+          delete_workflow_pattern: build.yaml
+          retain_days: 0
+          keep_minimum_runs: 1
